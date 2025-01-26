@@ -162,78 +162,183 @@
     </div>
 
     <script>
-        const activeRooms = new Map();
+        class RoomManager {
+            constructor() {
+                this.loadRooms();
+            }
+
+            loadRooms() {
+                const savedRooms = localStorage.getItem('cipher_talk_rooms');
+                this.rooms = savedRooms ? JSON.parse(savedRooms) : {};
+            }
+
+            saveRooms() {
+                localStorage.setItem('cipher_talk_rooms', JSON.stringify(this.rooms));
+            }
+
+            createRoom(roomName, password, playerName) {
+                if (this.rooms[roomName]) {
+                    throw new Error('Room already exists');
+                }
+
+                this.rooms[roomName] = {
+                    password: CryptoJS.SHA256(password).toString(),
+                    messages: [],
+                    users: [playerName],
+                    createdAt: new Date().toISOString()
+                };
+
+                this.saveRooms();
+                return true;
+            }
+
+            joinRoom(roomName, password, playerName) {
+                const room = this.rooms[roomName];
+                
+                if (!room) {
+                    throw new Error('Room does not exist');
+                }
+
+                if (room.password !== CryptoJS.SHA256(password).toString()) {
+                    throw new Error('Invalid password');
+                }
+
+                if (!room.users.includes(playerName)) {
+                    room.users.push(playerName);
+                    this.saveRooms();
+                }
+
+                return room;
+            }
+
+            addMessage(roomName, message) {
+                if (!this.rooms[roomName]) {
+                    throw new Error('Room does not exist');
+                }
+
+                this.rooms[roomName].messages.push(message);
+                this.saveRooms();
+            }
+
+            destroyRoom(roomName) {
+                if (!this.rooms[roomName]) {
+                    throw new Error('Room does not exist');
+                }
+
+                const roomData = this.rooms[roomName];
+                delete this.rooms[roomName];
+                this.saveRooms();
+                return roomData;
+            }
+        }
+
+        const roomManager = new RoomManager();
         let currentRoom = null;
         let currentUser = null;
 
-        function showStatus(message, isError = false) {
-            const status = document.getElementById('status');
-            status.textContent = message;
-            status.style.background = isError ? '#ff6b6b' : '#64ffda';
-            status.style.color = isError ? '#fff' : '#0a192f';
-        }
-
         function handleCreateRoom() {
-            const roomName = document.getElementById('createRoomName').value;
-            const roomPass = document.getElementById('createRoomPass').value;
-            const playerName = document.getElementById('createPlayerName').value;
+            const roomName = document.getElementById('createRoomName').value.trim();
+            const roomPass = document.getElementById('createRoomPass').value.trim();
+            const playerName = document.getElementById('createPlayerName').value.trim();
 
             if (!roomName || !roomPass || !playerName) {
                 showStatus('Please fill all fields', true);
                 return;
             }
 
-            if (activeRooms.has(roomName)) {
-                showStatus('Room already exists', true);
-                return;
+            try {
+                roomManager.createRoom(roomName, roomPass, playerName);
+                currentRoom = roomName;
+                currentUser = playerName;
+                showChatInterface();
+                showStatus(`Room "${roomName}" created successfully`);
+            } catch (error) {
+                showStatus(error.message, true);
             }
-
-            const room = {
-                name: roomName,
-                password: CryptoJS.SHA256(roomPass).toString(),
-                messages: [],
-                users: [playerName]
-            };
-
-            activeRooms.set(roomName, room);
-            joinRoom(roomName, roomPass, playerName);
         }
 
         function handleJoinRoom() {
-            const roomName = document.getElementById('joinRoomName').value;
-            const roomPass = document.getElementById('joinRoomPass').value;
-            const playerName = document.getElementById('joinPlayerName').value;
+            const roomName = document.getElementById('joinRoomName').value.trim();
+            const roomPass = document.getElementById('joinRoomPass').value.trim();
+            const playerName = document.getElementById('joinPlayerName').value.trim();
 
             if (!roomName || !roomPass || !playerName) {
                 showStatus('Please fill all fields', true);
                 return;
             }
 
-            joinRoom(roomName, roomPass, playerName);
+            try {
+                roomManager.joinRoom(roomName, roomPass, playerName);
+                currentRoom = roomName;
+                currentUser = playerName;
+                showChatInterface();
+                loadMessages();
+                showStatus(`Joined room "${roomName}" successfully`);
+            } catch (error) {
+                showStatus(error.message, true);
+            }
         }
 
-        function joinRoom(roomName, password, playerName) {
-            const room = activeRooms.get(roomName);
+        function handleSendMessage() {
+            const input = document.getElementById('messageInput');
+            const messageText = input.value.trim();
+
+            if (!messageText || !currentRoom || !currentUser) return;
+
+            const room = roomManager.rooms[currentRoom];
+            const previousMessage = room.messages[room.messages.length - 1];
             
-            if (!room) {
-                showStatus('Room does not exist', true);
-                return;
-            }
+            const messageObj = {
+                user: currentUser,
+                text: messageText,
+                timestamp: new Date().toISOString(),
+                encrypted: previousMessage ? 
+                    encryptMessage(previousMessage.text, messageText) : 
+                    'First message'
+            };
 
-            if (room.password !== CryptoJS.SHA256(password).toString()) {
-                showStatus('Invalid password', true);
-                return;
+            try {
+                roomManager.addMessage(currentRoom, messageObj);
+                displayMessage(messageObj);
+                input.value = '';
+            } catch (error) {
+                showStatus(error.message, true);
             }
+        }
 
-            currentRoom = roomName;
-            currentUser = playerName;
-            
-            if (!room.users.includes(playerName)) {
-                room.users.push(playerName);
+        function handleDestroyRoom() {
+            if (!currentRoom) return;
+
+            if (confirm('Are you sure you want to destroy this room?')) {
+                try {
+                    const roomData = roomManager.destroyRoom(currentRoom);
+                    handleDownload(roomData);
+                    document.getElementById('loginPanels').style.display = 'grid';
+                    document.getElementById('chatArea').style.display = 'none';
+                    currentRoom = null;
+                    currentUser = null;
+                    showStatus('Room destroyed successfully');
+                } catch (error) {
+                    showStatus(error.message, true);
+                }
             }
+        }
 
-            showChatInterface();
-            showStatus(`Joined room: ${roomName}`);
+        function handleDownload(roomData) {
+            const messages = roomData ? roomData.messages : roomManager.rooms[currentRoom].messages;
+            const chatText = messages.map(m => 
+                `${new Date(m.timestamp).toLocaleString()} - ${m.user}: ${m.text}\nEncrypted: ${m.encrypted}\n`
+            ).join('\n');
+
+            const blob = new Blob([chatText], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `chat_${currentRoom}_${new Date().toISOString()}.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
         }
 
         function showChatInterface() {
@@ -241,30 +346,18 @@
             document.getElementById('chatArea').style.display = 'block';
             document.getElementById('roomName').textContent = currentRoom;
             document.getElementById('userName').textContent = currentUser;
-            loadMessages();
         }
 
-        function handleSendMessage() {
-            const input = document.getElementById('messageInput');
-            const message = input.value.trim();
-
-            if (!message) return;
-
-            const room = activeRooms.get(currentRoom);
-            const previousMessage = room.messages[room.messages.length - 1];
+        function loadMessages() {
+            if (!currentRoom) return;
             
-            const messageObj = {
-                user: currentUser,
-                text: message,
-                timestamp: new Date().toISOString(),
-                encrypted: previousMessage ? 
-                    encryptMessage(previousMessage.text, message) : 
-                    'First message'
-            };
-
-            room.messages.push(messageObj);
-            displayMessage(messageObj);
-            input.value = '';
+            const room = roomManager.rooms[currentRoom];
+            const messagesDiv = document.getElementById('messages');
+            messagesDiv.innerHTML = '';
+            
+            if (room && room.messages) {
+                room.messages.forEach(displayMessage);
+            }
         }
 
         function displayMessage(message) {
@@ -282,43 +375,20 @@
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
 
-        function loadMessages() {
-            const room = activeRooms.get(currentRoom);
-            const messagesDiv = document.getElementById('messages');
-            messagesDiv.innerHTML = '';
-            room.messages.forEach(displayMessage);
-        }
-
         function encryptMessage(previousText, currentText) {
             const key = previousText + currentText;
             return CryptoJS.AES.encrypt(previousText, key).toString();
         }
 
-        function handleDownload() {
-            const room = activeRooms.get(currentRoom);
-            const chatText = room.messages.map(m => 
-                `${new Date(m.timestamp).toLocaleString()} - ${m.user}: ${m.text}\nEncrypted: ${m.encrypted}\n`
-            ).join('\n');
-
-            const blob = new Blob([chatText], { type: 'text/plain' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `chat_${currentRoom}_${new Date().toISOString()}.txt`;
-            a.click();
-            URL.revokeObjectURL(url);
-        }
-
-        function handleDestroyRoom() {
-            if (confirm('Are you sure you want to destroy this room?')) {
-                handleDownload();
-                activeRooms.delete(currentRoom);
-                document.getElementById('loginPanels').style.display = 'grid';
-                document.getElementById('chatArea').style.display = 'none';
-                currentRoom = null;
-                currentUser = null;
-                showStatus('Room destroyed');
-            }
+        function showStatus(message, isError = false) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.style.background = isError ? '#ff6b6b' : '#64ffda';
+            status.style.color = isError ? '#fff' : '#0a192f';
+            setTimeout(() => {
+                status.textContent = '';
+                status.style.background = 'transparent';
+            }, 3000);
         }
 
         // Handle Enter key in message input
